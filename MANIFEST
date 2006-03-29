@@ -1,0 +1,30 @@
+bin/volityd
+Makefile.PL
+Changes
+lib/Volity.pm
+lib/Volity/Bot.pm
+lib/Volity/Bot/TicTacToe/Random.pm
+lib/Volity/Game.pm
+lib/Volity/Game/TicTacToe.pm
+lib/Volity/GameRecord.pm
+lib/Volity/Jabber.pm
+lib/Volity/Player.pm
+lib/Volity/Referee.pm
+lib/Volity/Seat.pm
+lib/Volity/Server.pm
+lib/Volity/WinnersList.pm
+lib/POE/Filter/XML/Node.pm
+lib/POE/Component/Jabber/Client/Legacy.pm
+inc/ExtUtils/AutoInstall.pm
+examples/README
+examples/tictactoe/conf.yml
+examples/tictactoe/ui_file/main.svg
+examples/tictactoe/ui_file/locale/en/gametokens.xml
+examples/tictactoe/ui_file/locale/en/message.def
+examples/tictactoe/ui_file/locale/en/seattokens.xml
+t/1.t
+t/pod-test.t
+LICENSE
+MANIFEST			This list of files
+README
+META.yml                                 Module meta-data (added by MakeMaker)

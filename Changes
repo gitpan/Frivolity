@@ -1,0 +1,165 @@
+0.6.0
+
+	- Rewrote all the modules' perldocs, based on user feedback. A
+	  newcomer to the system should be able to "perldoc Volity" and go
+	  on from there with little difficulty.
+
+	- Volity::Bot was rewritten to be actually useable by people
+	  besides me. Additionally, Bot subclasses no longer define their
+	  JIDs in their code; you now pass this info in when you run
+	  volityd. Unfortunately it is not guaranteed to be backwards
+	  compatible, but I have the sneaking suspicion that nobody else
+	  had been using this module anyways.
+
+	- volityd now supports config files, as well as Getopt::Long-style
+	  command-line options.
+
+	- Added support for admin.* RPCs, and some other methods that they
+	  use. For the time being I just copied the admin RPCs that Andrew
+	  Plotkin implemented for his own Python-based Volity libs.
+
+	- Friv has been removed from the distribution.
+
+0.5.3
+
+	- Added our own fork of POE::Filter::XML::Node.
+
+0.5.2
+	- More bugfixes, and small tweaks to keep up with minor
+          protocol changes.
+
+	- Got rid of the Build::Install process, replacing it with
+	  ExtUtils::MakeMaker and ExtUtils::AutoInstall. Made 
+	  SpiderMonkey and other things that Friv needed optional,
+          rather than required.
+
+        - Changed the callback interface in Volity::Game for game state
+          requests. It's quietly backwards-compatible with the previous
+          interface. See that module's send_config_state_to_player and
+          send_game_state_to_player methods.
+
+0.5.1	
+
+	- Various bugfixes throughout the modules.
+
+	- Made the attemped-sexy accessors for array-based instance
+	  variables in the Volity base class a little sexier.
+
+	- Added Volity::WinnersList, which makes the creation of
+	  end-of-game winners lists (for inclusion in game records) easier.
+	
+0.5.0
+
+	- MAJOR changes all over the place, reflecting development with
+	  the core Volity protocol between fall 2004 and summer 2005. This
+	  includes implementatoin of several new concepts, including
+	  readiness, table configuration, the game and UI finders, and
+	  seats. See the Volity Wiki (http://volity.org/wiki) for more
+	  information about any of these.
+	
+	- Bugfix: The "smart" array hander in Volity.pm's get() accessor
+	  method was actually kind of dumb. It's less so now.
+
+0.4.1
+
+	- Bugfix: Wasn't requesting disco-info on multiple UI files
+          properly. Now it is.
+
+	- Started to implement player-to-player invitations. See the
+	  "invite" and "accept" commands in Friv.
+
+0.4.0
+
+	- Expanded the Bot base class's usefulness.
+
+ 	- Made service disocvery support actually work. Friv now uses
+	  uses it to discover game UI files, and automatically fetch
+	  and install them (unless the user has manually loaded local UI
+	  files).
+
+	- Nice, configurable logging is now supported throughout the
+	  modules. As a result, the module now requires the Log::Log4perl
+	  module as an installation prerequisite.
+
+	- The game server daemon program is now named volityd, not
+      	  server.pl. And it's documented! And supports logging!
+
+	- Improved Friv's documentation, including clarification of how
+	  one actually plays a game with it.
+
+	- Lots of bugfixes. Prior to this version, you could not
+          successfully run a game server using the most recent version
+          of the RPC::XML module... whoops.
+	
+0.3.0
+
+	- Added support for bot invitations.
+
+	- Greater support for forms in Volity::Jabber.
+	
+	- Added send_presence method to Volity::Jabber.
+
+	- Volity::Server objects now listen for incoming presence
+          subscriptions, and automatically approve of them.
+
+	- Rewrote and renamed the text client. It's now 'Friv', under
+          the executable 'friv'.
+
+	- Added basic roster, service discovery support, and user
+	  regsitration to Volity::Jabber.
+
+	- Added (most of) the above to Friv, too.
+
+	- Implemented support for ECMAScript throughout Friv and the
+	  server modules. Friv now requires the JavaScript::SpiderMonnkey
+	  module.
+
+	- All RPC calls are now in either the 'volity.*' or 'game.*'
+          namespaces.
+
+	- Rewrote lots of low-level stuff in Volity::Jabber and
+          elsewhere to cope with API change to the new (tentative v1.0)
+          pre-release version of POE::Component::Jabber.
+
+0.2.2
+
+	- (distribution) Improved the test.pl script. It now more
+          properly takes advantage of Test::More's abilities, and is
+          easier to extend.
+
+	- More cruft removal from Game.pm, Server.pm.
+
+	- Fixed a bug in Volity::Jabber that prevented it from opening
+          connections to remote servers correctly (!) (The call to
+          POE::Component::Jabber's constructor lacked sufficient
+          information.)
+
+	- Eliminated dependency of my silly, non-CPAN Class::Accessor::Fields
+	  module, and added dependency on CPAN's Class::Fields. This is better,
+	  though it still means that pseudohashes are being used for now.
+
+0.2.1
+	- Servers now keep track of referees they create, and provide the
+	  appropriate accessor methods. A server that receives a 'stop'
+	  message will pass this along to its referees.
+
+	- Added a 'stop' method to Server and Referee classes.
+
+	- Added lots of POD docs throughout the package.
+
+	- Added this Changes file to the package!
+
+	- Added a test suite, which can be run through the 'test' command
+       	  of the Build script.
+
+	- Rubbed out various hardcoded settings in Server and Referee.
+
+	- Changed messy debug print()s into debug() method calls.
+
+	- Added (unfortunately) "no warnings(deprecated)" to suppress
+	  whinging about bad pseudohashes. We'll eject phashes later.
+
+	- Volity::Game now inherits from Class::Data::Inheritable, and is
+	  now the place to set game configuration information such as the
+	  game's URI and allowed player range.
+	

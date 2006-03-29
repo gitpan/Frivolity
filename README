@@ -1,0 +1,83 @@
+--- WHAT IS THIS? ---
+
+Frivolity is a free, Perl-based reference implementation of the Volity
+platform for Internet-based game play. It is released under the LGPL
+open-source license. (See the accompanying LICENSE file.)
+
+Volity is a complex platform, but I've endeavored to make it easy to
+get started creating games through the embedded perldocs. After
+installing, "perldoc Volity" to get started.
+
+Further reading, including more general information about what Volity
+is and how it works, may be found on the Volity Developers' Site:
+http://www.volity.org
+
+See especially the Wiki.
+
+--- PREREQUISITES ---
+
+Frivolity requires several Perl modules to work; the Makefile.PL
+checks for their presence on your system. All are available from CPAN.
+
+Note that we include our own forks of POE::Filter::XML::Node and
+POE::Component::Jabber::Client::Legacy, which repair errors found
+with the versions of those (otherwise just fine) modules as found on
+CPAN.
+
+--- INSTALLATION ---
+
+The usual incantation should suffice:
+
+ perl Makefile.PL
+ make
+ sudo make install
+
+It will, by default, install several Perl modules into your site-perl
+location under the Volity namespace, and place a server script
+(volityd) in /usr/local/volity/bin. If these locations do not suit
+you, edit Makefile.PL appropriately. (See the ExtUtils::MakeMaker
+manpage for instructions on modifying this file.)
+
+You'll note there's not much in the way of testing now. We hope to add
+some nice test suites in the future.
+
+--- DOCUMENTATION ---
+
+Once you've installed this software, type
+
+ perldoc Volity
+
+Frivolity includes a lot of modules and a lot of documentation, but
+I've done my best to arrange it so that the most important stuff,
+especially for people wishing to develop games, is easier to get to.
+
+--- RUNNING YOUR FIRST PARLOR  ---
+
+While no automated testing exists yet, you can manually test your
+installation by attempting to set up a game parlor that runs Tic Tac
+Toe. At examples/tictactoe/conf.yml you'll find a configuration file
+that you can modify with a valid Jabber ID and password for your test
+to use. (If you already have a Jabber login from any source, you can
+just plug it in here.)
+
+Once you've updated the file (and installed Frivolity), try feeding it
+to volityd with a command like this (assuming that volityd ended up
+somewhere in your PATH):
+
+ volityd -C examples/tictactoe/conf.yml
+
+If everything worked, you should now be able to create a new table at
+the parlor with any Volity client. In Javolin, this involves the
+Game->New Table At... command. (If you don't already have Javolin, you
+can download it from volity.org:
+http://www.volity.org/projects/javolin/)
+
+--- CONTACT ---
+
+Please send all questions, comments, bug reports, etc. to Jason
+McIntosh <jmac@jmac.org>.
+
+For community discussion about these modules, see the volity-devel
+mailing list:
+<http://lists.sourceforge.net/lists/listinfo/volity-devel>. Its
+archives are on the Web, and offers open subscription to all.

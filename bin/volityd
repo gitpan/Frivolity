@@ -1,0 +1,597 @@
+#!/usr/bin/perl 
+
+############################################################################
+# LICENSE INFORMATION - PLEASE READ
+############################################################################
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 2.1 of the License, or (at your option) any later version.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public
+# License along with this library; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+############################################################################
+
+eval 'exec /usr/bin/perl  -S $0 ${1+"$@"}'
+    if 0; # not running under some shell
+
+use warnings;
+use strict;
+
+use Volity::Server;
+use Getopt::Long;
+use Volity::GameRecord;
+
+use YAML;
+use Cwd;
+
+my %volityd_info_for_server_object = (
+				      cwd => cwd(),
+				      argv => [@ARGV],
+				      command => $0,
+				      );
+
+Getopt::Long::Configure(qw(no_ignore_case no_auto_abbrev));
+
+my %valid_options = (
+		    host=>"h",
+		    username=>"u",
+		    password=>"p",
+		    game_class=>"g",
+		    jabber_id=>"J",
+		    admins=>"a",
+		    bookkeeper=>"b",
+		    contact_email=>"c",
+		    pidfile=>"f",
+		    contact_jabber_id=>"j",
+		    log_config=>"l",
+		    log_config_info=>"i",
+		    log_config_file=>"F",
+		    muc_server=>"m",
+		    port=>"o",
+		    resource=>"r",
+		    volity_version=>"v",
+		    config=>"C",
+		    visibility=>"V",
+		    );
+my @getopt_options = map("$_|$valid_options{$_}=s", keys(%valid_options));
+
+my %opts;
+GetOptions(\%opts,
+	   @getopt_options,
+	   "bot_class|B=s@",
+	   "bot_jabber_id|I=s@",
+	   "bot_username|U=s@",
+	   "bot_host|H=s@",
+	   "bot_password|P=s@",
+	   );
+
+# Parse out any command-line bot-config options.
+my @command_line_bot_configs;
+if ($opts{bot_class}) {
+    for my $index (0..@{$opts{bot_class}} - 1) {
+	my %bot_config;
+	foreach (qw(bot_class bot_jabber_id bot_username bot_host bot_password)) {
+	    $bot_config{$_} = $opts{$_}[$index];
+	}
+	push (@command_line_bot_configs, \%bot_config);
+    }
+}
+
+# Take care of possible config-file loading.
+if ($opts{config}) {
+    my $from_config;
+    eval {
+	$from_config = YAML::LoadFile($opts{config});
+    };
+
+    if ($@) {
+	die "No data loaded from the config file path '$opts{config}'.\nYAML error:\n$@\n";
+    }
+    if (ref($from_config) eq "HASH") {
+	for my $option_from_config (keys(%$from_config)) {
+	    if ($valid_options{$option_from_config} || $option_from_config eq "bots") {
+		$opts{$option_from_config} = $$from_config{$option_from_config};
+	    }
+	    else {
+		die "Unrecognized option '$option_from_config' in config file $opts{config}.\n";
+	    }
+	}
+    }
+    else {
+	die "The config file must be a YAML file representation of an anonymous hash. Please see the volityd manpage for more information.\n";
+    }
+
+}
+	   
+# Merge command-line bot config info with bot config infro from the
+# config file.
+$opts{bots} ||= [];
+push (@{$opts{bots}}, @command_line_bot_configs);
+
+# Check to see if there's a J option, with a full login JID. If so,
+# break it up and stuff the parts into other opts. Collisions are bad,
+# though.
+if ($opts{jabber_id}) {
+    if ($opts{username} || $opts{host} || $opts{resource}) {
+	die "If you provide a full login JID with the J flag, then you can't use the u, h, or r flags. Make up your mind and use one style or the other!\n";
+    }
+    ($opts{username}, $opts{host}, $opts{resource}) = $opts{jabber_id} =~ m|^(.*?)@(.*?)(?:/(.*?))?$|;
+    unless ($opts{username}) {
+	die "I couldn't parse '$opts{jabber_id}' as a valid JID. Sorry!\n";
+    }
+}
+
+# Sanity-check the bot configs.
+my %seen_bot_jids;
+my %seen_bot_classes;
+for my $bot_config (@{$opts{bots}}) {
+    my $bot_jid;
+    if ($$bot_config{bot_jabber_id}) {
+	my ($username, $host,  $resource) = $$bot_config{bot_jabber_id} =~ m|^(.*?)@(.*?)(?:/(.*?))?$|;
+	unless ($username) {
+	    die "Bad config: I couldn't parse the bot Jabber ID '$$bot_config{bot_jabber_id}' as a valid JID. Sorry!\n";
+	}
+	$bot_jid = "$username\@$host";
+	if ($resource) {
+	    warn "Config warning: It's meaningless to specify a resource string on Jabber IDs for bots to use. I'm interpreting '$$bot_config{bot_jabber_id}' as '$bot_jid'.\n";
+	}
+	if ($$bot_config{bot_username} || $$bot_config{bot_host} || $$bot_config{bot_resource}) {
+	    die "Bad config: If you provide a bot's full Jabber ID, as you do with $$bot_config{bot_jabber_id}, then you can't also define its bot_username and bot_host options\n";
+	}
+	$$bot_config{bot_username} = $username;
+	$$bot_config{bot_host} = $host;
+    }
+    else {
+	foreach (qw(bot_username bot_host)) {
+	    unless (defined($$bot_config{$_})) {
+		die "Bad config: You must provide either a bot_jid or a bot_username and bot_host for every bot in your config.\n";
+	    }
+	}
+	$bot_jid = "$$bot_config{bot_username}\@$$bot_config{bot_host}";
+    }
+
+    unless ($$bot_config{bot_password}) {
+	if (($opts{username} eq $$bot_config{bot_username}) &&
+	    ($opts{host} eq $$bot_config{bot_host})) {
+	    $$bot_config{bot_password} = $opts{password};
+	}
+	else {
+	    die "Bad config: You must supply a Jabber login password for every bot whose Jabber ID doesn't match that of your parlor.\n";
+	}
+    }
+
+    if ($seen_bot_jids{$bot_jid}) {
+	die "Bad config: You have defined a bot with Jabber ID $bot_jid more than once in your config. Different bot classes should use different Jabber IDs.\n";
+    }
+    else {
+	$seen_bot_jids{$bot_jid} = 1;
+    }
+
+    if ($seen_bot_classes{$$bot_config{bot_class}}) {
+	die "Bad config: You have more than one bot defined to use the class $$bot_config{bot_class}. Each type of bot your parlor uses should have its own, unque class.\n";
+    }
+    else {
+	$seen_bot_classes{$$bot_config{bot_class}} = 1;
+    }
+	foreach (qw(bot_username bot_password bot_host bot_class)) {
+	    my ($new_field) = /_(.*)$/;
+	    $$bot_config{$new_field} = $$bot_config{$_};
+	    delete($$bot_config{$_});
+	}
+}
+
+foreach (qw(username host password)) {
+    unless ($opts{$_}) {
+	die "You must define a $_, either on the command line or in a config file.\n";
+  }
+}
+
+if (defined($opts{game_class})) {
+    eval qq|require $opts{game_class}|;
+    if ($@) {
+	die "Couldn't load the game module $opts{game_class}: $@\n";
+    } 
+    unless ($opts{game_class}->isa("Volity::Game")) {
+	die "The class you define as your game module must be a subclass of Volity::Game.\n";
+    }
+} else {
+  die "You must define a game class, either on the command line or in a config file.\n";
+}
+
+if (defined($opts{pidfile})) {
+    open (PID, ">$opts{pidfile}") or die "Can't write a PIDfile to $opts{pidfile}: $!";
+    print PID $$;
+    close PID or die "Can't close PIDfile $opts{pidfile}: $!";
+}
+
+# Hardcoded default bookkeeper JID.
+my $default_bkp = 'bookkeeper@volity.net/volity';
+
+# Hardcoded alias.
+my $alias = 'volity';
+
+my @admin_jids;
+if ($opts{admins}) {
+    for my $jid (split(/\*s,\s*/, $opts{admins})) {
+	# Sanity-check the JIDs, and strip resource strings.
+	if (my ($stripped_jid) = $jid =~ /^(.+?\@.+?)(\/.+$)?$/) {
+	    push (@admin_jids, $stripped_jid);
+	    if ($2) {
+		warn "Stripping resource string from admin JID $jid.\n";
+	    }
+	} else {
+	    die "Bad admin JID: $jid\n";
+	}
+    }
+} else {
+    @admin_jids = ();
+}
+
+
+my $server = Volity::Server->new(
+				 {
+				  user=>$opts{username},
+				  password=>$opts{password},
+				  port=>$opts{port} || 5222,
+				  host=>$opts{host},
+				  resource=>$opts{resource} || 'volity',
+				  alias=>$alias,
+				  game_class=>$opts{game_class},
+				  bookkeeper_jid=>$opts{bookkeeper} || $default_bkp,
+				  muc_host=>$opts{muc_server} || 'conference.volity.net',
+				  volity_version=>$opts{volity_version} || '1.0',
+				  contact_email=>$opts{contact_email},
+				  contact_jid=>$opts{contact_jabber_id},
+				  visible=>defined($opts{visibility})? $opts{visibility} : 1,
+				  admins=>\@admin_jids,
+				 }
+				);
+
+if (defined($opts{log_config_info})) {
+    if (defined($opts{log_config}) || defined($opts{log_config_file})) {
+	die "You can't use specify both log config info and a log config file. Please use one or the other.\n";
+    }
+    Log::Log4perl::init(\$opts{log_config_info});
+    Log::Log4perl->get_logger("Volity");
+}    
+elsif (defined($opts{log_config}) || defined($opts{log_config_file})) {
+    my $logger_config_filename = defined($opts{log_config})? $opts{log_config} : $opts{log_config_file};
+    Log::Log4perl::init($logger_config_filename);
+    Log::Log4perl->get_logger("Volity");
+}
+
+# $server->bot_classes(@bot_classes);
+$server->bot_configs($opts{bots});
+
+foreach (keys(%volityd_info_for_server_object)) {
+    my $method = "volityd_$_";
+    $server->$method($volityd_info_for_server_object{$_});
+}
+
+$server->start;
+
+=head1 NAME
+
+volityd -- A daemon that runs a Volity parlor
+
+=head1 DESCRIPTION
+
+This is a program for running Volity parlors. It uses the Volity
+hierarchy of Perl modules to run a game module specified at runtime.
+
+=head1 CONFIGURATION
+
+You can run volityd with a configuration file, or by supplying a list
+of command-line options at runtime. You can also mix the two methods,
+in which case options you specify on the command line will override
+any of their counterparts in the config file. See L<"Config file
+format"> for more about the config file.
+
+Since there are many options, we recommend the use of a config
+file. The C<examples/> directory included with this distribution
+contains a config file for running a Tic Tac Toe parlor.
+
+In the following documentation, each option has two names listed: its
+one-letter abbreviation followed by its long name. Either is usable on
+the command line, but the config file works with the only the long names.
+
+For example, to set the Jabber ID that your parlor should use as
+C<foo@example.com>, you can either supply B<-J foo@example.com> or
+B<-jabber_id=foo@example.com> on the command line, or the line
+C<jabber_id: foo@example.com> in the config file.
+
+An exception comes in how you define bots; see L<"Configuring bots">.
+
+=head2 Required parameters
+
+The program will immediately die (with a specific complaint) if you
+don't specify enough information on the command line to allow the
+parlor to authenticate with the Jabber server, or run a game
+module. Use an appropriate combination of the following flags to
+achieve this.
+
+=over
+
+=item h host
+
+The hostname of the Jabber server that the parlor will use.
+
+=item u username
+
+The Jabber username that the parlor will use when connecting.
+
+=item p password
+
+The password that the parlor will use when authenticating with
+the Jabber server.
+
+If you supply this on the command line, volityd will automatically
+modify C<$0> so that it won't be exposed to process-listing commands
+like B<ps>.
+
+=item g game_class
+
+The full Perl package name of the game module that the parlor
+will run. It must be visible to @INC.
+
+=item J jabber_id
+
+The parlor's full Jabber ID. You can use this flag instead of using
+the C<username>, C<host> and C<resource> options. (But you can't use
+both this I<and> them.)
+
+=back
+
+=head2 Optional parameters
+
+Each of the following are optional. Not defining them at runtime will
+result in default behavior as described.
+
+=over
+
+=item a admins
+
+A comma-separated list of Jabber IDs that are allowed to send admin.*
+RPCs to this parlor. All admin.* calls from Jabber IDs not on this
+list result in faults sent back to the caller.
+
+B<Default>: None.
+
+=item b bookkeeper
+
+The JabberID of the Volity network's bookkeeper.
+
+B<Default>: bookkeeper@volity.net/volity
+
+=item c contact_email
+
+The contact email address of the person responsible for this parlor.
+
+Polite parlors set either this or the B<contact_jabber_id> option (or both).
+
+B<Default>: None.
+
+=item f pidfile
+
+The filesystem pathname of the pidfile to be created when the parlor
+starts.
+
+B<Default>: None, and no pidfile is used.
+
+=item i log_config_info
+
+A string containing C<Log::Log4perl> configuration information,
+defining the behavior of the volityd logger. See L<Log::Log4perl>. (A
+reference to this string is passed directly to that module's C<init()>
+method.)
+
+The logger works through various Log4perl invocations already spread
+throughout the Volity modules, set at appropriate priority levels,
+ranging from 'DEBUG' to 'INFO' to 'FATAL'.
+
+The program will die with an error if you define both this option and
+B<log_config_file>.
+
+B<Default>: None, and no logging occurs unless you specify a value for
+the B<log_config_file> option.
+
+=item j contact_jabber_id
+
+The contact Jabber ID of the person responsible for this parlor.
+
+Polite parlors set either this or the C<contact_email> option (or both).
+
+B<Default>: None.
+
+=item m muc_server
+
+The hostname of the Jabber MUC server to use when creating new game tables.
+
+B<Default>: conference.volity.net
+
+=item o port
+
+The Jabber server's TCP port.
+
+B<Default>: 5222 (the standard Jabber connection port)
+
+=item r resource
+
+The Jabber resource string that the parlor will use after
+authenticating. The string 'volity' (the default string) is a good
+choice for 'live' parlors; use something like 'testing'
+otherwise.
+
+B<Default>: 'volity'
+
+=item v volity_version
+
+The version number of the Volity platform protocol that this parlor supports.
+
+Unless you're doing something highly unusual with the Volity Perl
+libraries, you're probably best sticking with the default value on
+this one.
+
+B<Default>: 1.0
+
+=item C config
+
+The path to a volityd config file. See L<"Config file format">.
+
+If you specify any command-line options beyond this one, they will
+override any config options specified in the file.
+
+B<Default>: None, and volityd will look for all options to come from
+the command line.
+
+=item F log_config_file
+
+The filesystem pathname of a C<Log::Log4perl> configuration file,
+which defines the behavior of the volityd logger. See
+L<Log::Log4perl>. (The filename is passed directly to that module's
+C<init()> method.)
+
+The logger works through various Log4perl invocations already spread
+throughout the Volity modules, set at appropriate priority levels,
+ranging from 'DEBUG' to 'INFO' to 'FATAL'.
+
+The program will die with an error if you define both this option and
+B<log_config_info>.
+
+B<Default>: None, and no logging occurs, unless you specify a value for the
+B<log_config_info> option. 
+
+=item V visibility
+
+Whether or not this parlor is visble to Volity's game finder. Set to 1
+if it is, or 0 if it should go unlisted.
+
+B<Default>: 1
+
+=back
+
+=head2 Config file format
+
+If you specify a config file via the B<-C> or B<--config> command-line
+options, then you must prepare a YAML file at that location. Its
+contents are simply a list of the options you want to set, with one
+option per line (but see L<"Configuring bots"> for an exception). Each
+option is keyed by its long name. Here's a possible snippet:
+
+ username: foo
+ host: volity.net
+ password: secretpassword42
+ game: Volity::Game::MyFunGame
+
+To specify a multiline value, set the value after the colon to | (a
+pipe character), followed by a newline, and then the value with every
+line indented, like so:
+
+ log_config_info: |
+  [ line 1 of config info ]
+  [ line 2 of config info ]
+  [ ... ]
+
+For more information about the YAML markup format, see L<YAML> or
+http://yaml.org .
+
+=head2 Configuring bots
+
+If you'd like your parlor to be able to use Perl bot classes installed
+on your machine (i.e. subclasses of C<Volity::Bot>), then you must
+specify several parameters for each class to use. These include the
+name of the bot's Perl class, a Jabber ID, and a password. (This
+latter is not necessary for bots whose basic Jabber ID matches that of
+your parlor.)
+
+Because of the plurality of options involved, bot configuration from
+the command line works differently than from a config file.
+
+The relevant I<command line> options include:
+
+=over
+
+=item B bot_class
+
+=item U bot_username
+
+=item H bot_host
+
+=item I bot_jabber_id (You can use this instead of bot_user & bot_host.)
+
+=item P bot_password (Not necessary if the bot and the parlor share a JID.)
+
+=back
+
+To define multiple bots, just invoke the flags multiple times. For example:
+
+ $ volityd -C some_config.yml -bot_class=Volity::Bot::MyFirstBot\
+                              -bot_jabber_id=firstbot@volity.net\
+                              -password=secretPASSword\
+                              -bot_class=Volity::Bot::MyOtherBot\
+                              -bot_jabber_id=secondbot@volity.net\
+                              -password=SECRETpassWORD
+
+From the I<config file>, define instead a YAML sequence under the key
+"bots". Each member of the sequence is a YAML mapping with the following keys:
+
+=over
+
+=item class
+
+=item username
+
+=item host
+
+=item jabber_id (You can use this instead of user & host.)
+
+=item password (Not necessary if the bot and the parlor have the same JID.)
+
+=back
+
+Here is an example config file snippet that performs the same
+bot configuration as above:
+
+
+ bots:
+	 - bot_class:     Volity::Bot::MyFirstBot
+	   bot_jabber_id: firstbot@volity.net
+           password:      secretPASSword
+	 - bot_class:     Volity::Bot::MyOtherBot
+	   bot_jabber_id: secondbot@volity.net
+           password:      SECRETpassWORD
+
+=head1 SEE ALSO
+
+=over
+
+=item *
+
+The Volity developer site: L<http://volity.org>
+
+=item *
+
+L<Volity>
+
+=item *
+
+L<YAML>
+
+=back
+
+=head1 AUTHOR
+
+Jason McIntosh <jmac@jmac.org>
+
+=head1 COPYRIGHT
+
+Copyright (c) 2006 by Jason McIntosh.
+
+=cut
