@@ -1,3 +1,4 @@
+package Volity::POE::Filter::XML::Node;
 package POE::Filter::XML::Node;
 use warnings;
 use strict;

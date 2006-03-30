@@ -1,3 +1,5 @@
+package Volity::POE::Component::Jabber::Client::Legacy;
+
 package POE::Component::Jabber::Client::Legacy;
 use POE::Preprocessor;
 const XNode POE::Filter::XML::Node
