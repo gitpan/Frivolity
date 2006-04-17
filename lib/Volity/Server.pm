@@ -467,7 +467,6 @@ sub handle_disco_items_request {
 	    # ruleset URI.
 	    my $uri;
 	    $uri = $self->game_class->uri; 
-	    warn "Wah, I see no URI under $game_class: $uri.";
 	    push (@items, Volity::Jabber::Disco::Item->new({
 		jid=>$self->bookkeeper_jid,
 		node=>$uri,
