@@ -1,9 +1,40 @@
+0.6.5
+
+	- Added leave_muc() method to Volity::Jabber.
+
+	- Volity::Game::TicTacToe now returns the volity.not_your_turn
+	  translaton token when it isn't your turn, instead of
+	  game.not_your_turn. The former has recently been added as a core
+	  Volity translation token.
+
+	- If a parlor loses its connection to the Jabber server, it
+          will attempt to reconnect, and if still not successful try
+          again every few seconds.
+
+	- There is now a logical separation between the the hostname of
+	  the Jabber server that Volity entities connect to, and the host
+	  part of their own JIDs. This allows proxying and such.
+
+	- Multiple bot support now actually works as advertised.
+
+	- Some endgame winner-list configurations would mysteriously break
+          things; no longer.
+
+	- The ref no longer allows non-seated players to suspend games.
+
+	- Experimental bot factory support. A future release will feature
+	  full support as well as a new framework for building your own
+	  bot factories.
+
+	- Removed our POE module forks, as the CPAN versions now work fine
+	  with Frivolity.
+	
 0.6.4
 
 	- Bugfix release. Volity::Game's current_seat method didn't work
 	  exactly as advertised, not updating the internal turn queue and
 	  therefore sometimes causing turn order to misbehave. This is
-	  fixed. Thanks to named@volity.net for spotting the error.
+	  fixed. Thanks to Austin Henry for spotting the error.
 
 0.6.3
 

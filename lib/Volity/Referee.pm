@@ -137,7 +137,7 @@ referee.
 
 use base qw(Volity::Jabber);
 # See comment below for what all these fields do.
-use fields qw(muc_jid game game_class players nicks starting_request_jid starting_request_id bookkeeper_jid server muc_host bot_configs bot_jids active_bots last_rpc_id invitations ready_players is_recorded is_hidden name language internal_timeout seats max_seats kill_switch startup_time last_activity_time games_completed);
+use fields qw(muc_jid game game_class players nicks starting_request_jid starting_request_id bookkeeper_jid server muc_host bot_configs bot_jids active_bots last_rpc_id invitations ready_players is_recorded is_hidden name language internal_timeout seats max_seats kill_switch startup_time last_activity_time games_completed bot_factory_requests);
 # FIELDS:
 # muc_jid
 #   The JID of this game's MUC.
@@ -177,6 +177,8 @@ use fields qw(muc_jid game game_class players nicks starting_request_jid startin
 #  Unix-time of the most recent game.* call.
 # games_completed
 #  The number of games that have come to an end under this referee.
+# bot_factory_requests
+#  Hash with info about outstanding RPC requests to bot factories.
 
 use warnings;  no warnings qw(deprecated);
 use strict;
@@ -408,6 +410,27 @@ sub handle_rpc_request {
 			    );
       
   }
+}
+
+# handle_rpc_response: The only RPC response we care about involves bot
+# factories. 
+sub handle_rpc_response {
+    my $self = shift;
+    my ($info_hash) = @_;
+    if ($info_hash->{id} =~ /^bot-factory-/) {
+	# This is the response to a new_bot RPC we sent earlier.
+	my $original_request_info = delete($self->{bot_factory_requests}->{$info_hash->{id}});
+
+	# Cancel the timeout alarm.
+	eval {$self->kernel->alarm_remove($original_request_info->{alarm_id})};
+
+	# Pass the response back to the original requestor.
+	$self->send_rpc_response(
+				 $original_request_info->{player_jid},
+				 $original_request_info->{rpc_id},
+				 $info_hash->{response},
+				 );
+    }
 }
 
 # handle_game_rpc_request: Called by handle_rpc_request upon receipt of an
@@ -1017,49 +1040,88 @@ sub handle_recorded_request {
 
 sub add_bot {
   my $self = shift;
-  my ($from_jid, $id, @args) = @_;
+  my ($from_jid, $id, $algorithm_uri, $bot_source_jid) = @_;
 
-  # First, check to see that we have bots, and return a fault if we don't.
-  unless ($self->bot_configs) {
-    $self->send_rpc_fault($from_jid, $id, 3, "Sorry, this game server doesn't host any bots.");
-    return;
+  $self->logger->debug("Got an add_bot request for algorithm $algorithm_uri.");
+
+  if (not($bot_source_jid) || $bot_source_jid eq $self->jid || $bot_source_jid eq $self->server->jid) {
+      # This is a request for a bot that we supply, and not for an external
+      # "bot factory" bot.
+
+      # First, check to see that we have bots, and return an error token if we don't.
+      unless ($self->bot_configs) {
+	  $self->send_rpc_response($from_jid, $id, ["volity.no_bots_provided"]);
+	  return;
+      }
+
+      unless ($algorithm_uri) {
+	  # The requestor didn't specify a preferred bot.
+	  # All righty, they'll just get the first one on our list, then.
+	  $algorithm_uri = $self->{bot_configs}->[0]->{class}->algorithm;
+      }
+
+      # Fetch the bot config that matches the requested algorithm URI.
+      my ($bot_config) = grep($_->{class}->algorithm eq $algorithm_uri,
+			      $self->bot_configs,
+			      );
+
+      unless ($bot_config) {
+	  $self->send_rpc_response($from_jid, $id, ["volity.bot_not_available"]);
+      }
+
+      if (my $bot = $self->create_bot($bot_config)) {
+	  $self->send_rpc_response($from_jid, $id, ["volity.ok", $bot->jid]);
+      } else {
+	  $self->send_rpc_fault($from_jid, $id, 608, "I couldn't create a bot for some reason.");
+      }
   }
-  
-  # If we offer only one flavor of bot, then Bob's your uncle.
-  my @bot_configs = $self->bot_configs;
-  if (@bot_configs == 1) {
-    if (my $bot = $self->create_bot($self->{bot_configs}->[0])) {
-      $self->send_rpc_response($from_jid, $id, ["volity.ok"]);
-#      $bot->kernel->run;
-    } else {
-      $self->send_rpc_fault($from_jid, $id, 4, "I couldn't create a bot for some reason.");
-    }
-    return;
+  else {
+      # A foreign source JID has been provided, so we are to employ a bot
+      # factory.
+
+      # Get a unqiue RPC ID for the request we're about to make.
+      my $factory_rpc_id = "bot-factory-" . $self->next_id;
+
+      # Set an alarm in case this request times out.
+      $self->kernel->state("bot_factory_timeout", $self);
+      my $alarm_id = $self->kernel->delay_set(
+					      "bot_factory_timeout",
+					      $self->internal_timeout,
+					      $factory_rpc_id,
+					      );
+
+      # File the alarm ID under the RPC ID, so that we can cancel the alarm
+      # once we get a response to the RPC.
+      $self->{bot_factory_requests}->{$factory_rpc_id} = 
+	  {
+	      alarm_id   => $alarm_id,
+	      player_jid => $from_jid,
+	      rpc_id     => $id,
+	  };
+	      
+      # Make the RPC.
+      $self->send_rpc_request({
+	  id         => $factory_rpc_id,
+	  to         => $bot_source_jid,
+	  methodname => "volity.new_bot",
+	  args       => [$algorithm_uri, $self->muc_jid],
+      });
+
   }
 
-  # We seem to have more than one bot. Send back a form.
-  my @form_options;
-  my $default_name_counter;
-  for my $bot_config ($self->bot_configs) {
-    my $label = $bot_config->{class}->name || 'Bot' . ++$default_name_counter;
-    if (defined($bot_config->{class}->description)) {
-      $label .= ": " . $bot_config->{class}->description;
-    }
-    push (@form_options, [$bot_config, $label]);
-  }
-  $self->send_form({
-		    fields=>{bot=>{
-				   type=>'list-single',
-				   options=>\@form_options,
-				   label=>"Choose a bot to add...",
-				  }
-			    },
-		    to=>$from_jid,
-		    id=>'bot_form',
-		    type=>'form',
-		   });
-  # Form sent; we're done here.
-  $self->send_rpc_response($from_jid, $id, ["volity.ok"]);
+}
+
+# bot_factory_timeout: Called as a POE event, when we spend too long waiting
+# for a bot factor to respond to a volity.new_bot() call.
+sub bot_factory_timeout {
+    my $self = shift;
+    my ($rpc_id) = @_;
+    my $original_request_info = delete($self->{bot_factory_requests}->{$rpc_id});
+    $self->send_rpc_response(
+			     $original_request_info->{player_jid},
+			     $original_request_info->{rpc_id},
+			     ["volity.replay_failed"],
+			     );
 }
 
 sub remove_bot {
@@ -1132,6 +1194,7 @@ sub create_bot {
   my $bot_class = $bot_config->{class};
   # Generate a resource for this bot to use.
   my $resource = $bot_class->name . gettimeofday();
+    
   my $bot = $bot_class->new(
 			    {
 			     password=>$bot_config->{password},
@@ -1140,6 +1203,8 @@ sub create_bot {
 			     muc_jid=>$self->muc_jid,
 			     user=>$bot_config->{username},
 			     host=>$bot_config->{host},
+			     jid_host=>$bot_config->{jid_host},
+			     port=>$bot_config->{port} || "5222",
 			    }
 			 );
   $self->logger->info("New bot (" . $bot->jid . ") created by referee (" . $self->jid . ").");
@@ -1178,6 +1243,9 @@ sub end_game {
   if (@slots and defined($slots[0])) {
       my @winners_list;
       for my $slot (@slots) {
+	  # I don't know now why $slot is sometimes undef. Will investigate later.
+	  # --jmac 08/2006
+	  next unless $slot;
 	  my @seats = @$slot;
 	  for my $seat (@seats) {
 	      $recorded_seats{$seat->id} = [$seat->registered_player_jids];
@@ -1391,7 +1459,11 @@ sub handle_suspend_request {
 	$self->send_rpc_fault($from_jid, $id, 609, "The game is not active.");
 	return;
     }
- 
+    unless ($player->seat) {
+	$self->send_rpc_fault($from_jid, $id, 607, "You can't suspend the game, because you are not seated.");
+	return;
+    }
+
     $self->send_rpc_response($from_jid, $id, ["volity.ok"]);
     $self->suspend_game($player);
 }
