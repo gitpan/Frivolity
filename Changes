@@ -1,3 +1,43 @@
+0.7.1
+
+        - volityd no longer requires that you provide a Volity::Game
+	  subclass name if you're starting a bot factory and not a game
+	  parlor
+
+	- Volity::Bot instances now track the status of other seats at
+          the table, and offer an occupied_seats method.
+
+        - Bots now always request state on joining tables, and
+          generally have more complete default behavior for various
+          Volity-level RPCs that the referee might send.
+
+        - Referees now send game records to the bookkeeper only if the
+          game is configured to be recorded.
+
+        - Referees more cleanly handle game configuation information,
+          and keeping this infomation around between plays.
+
+        - Volity::WinnersList objects now offer a clear() method.
+
+        - More correct handling of game abandonment.
+
+        - Volity::Jabber (and its myriad subclasses) now require - and are
+          compatible with - POE::Component::Jabber v2.
+
+0.7
+
+	- Partial payment protocol support.
+
+	- The libraies are now far more resistant to exceptions arising
+          from bad RPC handling.
+0.6.6
+
+	- Full bot factory support. This inlcudes a new Volity::Factory
+	  class, changes to volityd that allow you to have it launch
+	  factories instead of parlors, and another example config file
+	  under /examples/tictactoe that runs a Tic Tac Toe bot
+	  factory. The volityd perldoc explains all.
+
 0.6.5
 
 	- Added leave_muc() method to Volity::Jabber.

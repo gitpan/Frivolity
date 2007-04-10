@@ -226,11 +226,20 @@ sub initialize {
 
     #  $self->current_player(($self->players)[0]);
     weaken( $self->{referee} );
-    $self->config_variables(        {} );
-    $self->config_variable_setters( {} );
     $self->winners( Volity::WinnersList->new );
-    $self->{turn_order} = [] unless defined($self->{turn_order});
-    $self->{turn_queue} = [] unless defined($self->{turn_queue});
+
+    # Set some defaults, being careful not to stomp changes that the subclass
+    # may have made already.
+    # Set defaults for internal hashrefs.
+    foreach (qw(config_variables config_variable_setters)) {
+	$self->{$_} = {} unless defined($self->{$_});
+    }
+    # Set defaults for internal arrayrefs.
+    foreach (qw(turn_order turn_queue)) {
+	$self->{$_} = [] unless defined($self->{$_});
+    }
+
+    # Set some starting values.
     $self->is_finished(0);
     $self->has_initialized(1);
 }
@@ -438,7 +447,8 @@ sub call_ui_function_on_seats {
 # We need to remember these for proper URI construction.
 sub register_config_variables {
     my $self  = shift;
-    my $class = ref($self);
+#    my $class = ref($self);
+    $self->{config_variables} ||= {};
     foreach (@_) {
         $self->config_variables->{$_} = 1;
     }
@@ -496,7 +506,7 @@ sub is_active {
 sub is_disrupted {
     my $self = shift;
     if (
-        grep( { not $_->is_under_human_control }
+        grep( { not $_->is_under_control }
             grep( { not $_->is_eliminated } $self->seats ) )
         && not( $self->is_abandoned )
         )

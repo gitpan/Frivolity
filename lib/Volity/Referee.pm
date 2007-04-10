@@ -137,7 +137,7 @@ referee.
 
 use base qw(Volity::Jabber);
 # See comment below for what all these fields do.
-use fields qw(muc_jid game game_class players nicks starting_request_jid starting_request_id bookkeeper_jid server muc_host bot_configs bot_jids active_bots last_rpc_id invitations ready_players is_recorded is_hidden name language internal_timeout seats max_seats kill_switch startup_time last_activity_time games_completed bot_factory_requests);
+use fields qw(muc_jid game game_class players nicks starting_request_jid starting_request_id bookkeeper_jid server muc_host bot_configs bot_jids active_bots last_rpc_id invitations ready_players is_recorded is_hidden name language internal_timeout seats max_seats kill_switch startup_time last_activity_time games_completed bot_factory_requests abandon_timeout_alarm suspend_timeout_alarm);
 # FIELDS:
 # muc_jid
 #   The JID of this game's MUC.
@@ -183,7 +183,6 @@ use fields qw(muc_jid game game_class players nicks starting_request_jid startin
 use warnings;  no warnings qw(deprecated);
 use strict;
 
-use lib qw(/Users/jmac/Library/Perl/);
 use Volity::Player;
 use Volity::Seat;
 use Volity::GameRecord;
@@ -246,7 +245,6 @@ sub initialize {
   $self->muc_jid($self->resource . '@' . $self->muc_host);
 
   # Set some query namespace handlers.
-  $self->query_handlers->{'volity:iq:botchoice'} = {set=>'choose_bot'};
   $self->query_handlers->{'http://jabber.org/protocol/muc#owner'} = {
       result=>'muc_creation',
       error=>'muc_failure',
@@ -268,9 +266,12 @@ sub initialize {
   $self->internal_timeout($default_internal_timeout);
 
   unless (defined($self->name)) {
-      # XXX Fix this...
-#      $self->name($self->table_creator->nick . "'s game");
-      $self->name("Some game.");
+      if ($self->game_class->name) {
+	  $self->name($self->game_class->name);
+      }
+      else {
+	  $self->name($self->jid);
+      }
   }
 
   unless (defined($self->language)) {
@@ -297,12 +298,9 @@ sub initialize {
 ################
 
 sub init_finish {
-  my $kernel = $_[KERNEL];
-  my $heap = $_[HEAP];
-  my $session = $_[SESSION];
-  my $self = $_[OBJECT];
+  my $self = shift;
   $self->logger->debug("***REFEREE*** We have authed!\n");
-  $kernel->post($self->alias, 'register', qw(iq presence message));
+  $self->kernel->post($self->alias, 'register', qw(iq presence message));
 
   # Join the game MUC.
   $self->join_muc({jid=>$self->muc_jid, nick=>'referee'});
@@ -312,103 +310,109 @@ sub init_finish {
 sub handle_rpc_request {
   my $self = shift;
   my ($rpc_info) = @_;
-  my $method = $$rpc_info{method};
+  eval {
+      my $method = $$rpc_info{method};
 
-  # For security's sake, we explicitly accept only a few method names.
-  # In fact, the only one we care about right now is 'start_game'.
-  # XXX The above statement is no longer true... and the below if-chain
-  # XXX is only going to get longer. Refactoring is needed.
-  if ($method =~ /^volity\.(.*)$/) {
-      # This appears to be a system-level call (as opposed to a
-      # game-level one).
-      $method = $1;
-      if ($method eq 'start_game') {
-          # Still here for backwards compatibility. Read as "ready()".
-	  $self->handle_ready_player_request($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
-      } elsif ($method eq 'add_bot') {
-	  $self->add_bot($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
-      } elsif ($method eq 'remove_bot') {
-	  $self->remove_bot($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
-      } elsif ($method eq 'invite_player') {
-	  $self->invite_player($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
-      } elsif ($method eq 'ready') {
-	  $self->handle_ready_player_request($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
-      } elsif ($method eq 'unready') {
-	  $self->handle_unready_player_request($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
-      } elsif ($method eq 'recorded') {
-	  $self->handle_recorded_request($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
-      } elsif ($method eq 'stand') {
-	  $self->handle_stand_request($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
-      } elsif ($method eq 'sit') {
-	  $self->handle_sit_request($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
-      } elsif ($method eq 'set_language') {
-	  $self->handle_language_request($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
-      } elsif ($method eq 'suspend_game') {
-	  $self->handle_suspend_request($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
-      } elsif ($method eq 'kill_game') {
-	  $self->handle_kill_request($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
-      } elsif ($method eq 'send_state') {
-	  $self->handle_state_request($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});	  
-      } else {
-	  $self->logger->warn("Got weird RPC request 'volity.$method' from $$rpc_info{from}.");
-	  $self->send_rpc_fault($$rpc_info{from}, $$rpc_info{id}, 603, "Unknown method: volity.$method");
-	  return;
-      }
-  } elsif ($method =~ /^game\.(.*)$/) {
-      # This appears to be a call to the game object.
-      # Reaction depends on whether or not the game is afoot.
-      my $method = $1;
-      my $ok_to_call = 0;
-      if ($self->game->is_afoot) {
-	  if ($self->game->is_config_variable($method)) {
-	      $self->send_rpc_fault($$rpc_info{from}, $$rpc_info{id}, 609, "You can't configure the game once it has started.");
+      # For security's sake, we explicitly accept only a few method names.
+      # In fact, the only one we care about right now is 'start_game'.
+      # XXX The above statement is no longer true... and the below if-chain
+      # XXX is only going to get longer. Refactoring is needed.
+      if ($method =~ /^volity\.(.*)$/) {
+	  # This appears to be a system-level call (as opposed to a
+	  # game-level one).
+	  $method = $1;
+	  if ($method eq 'start_game') {
+	      # Still here for backwards compatibility. Read as "ready()".
+	      $self->handle_ready_player_request($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
+	  } elsif ($method eq 'add_bot') {
+	      $self->add_bot($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
+	  } elsif ($method eq 'remove_bot') {
+	      $self->remove_bot($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
+	  } elsif ($method eq 'invite_player') {
+	      $self->invite_player($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
+	  } elsif ($method eq 'ready') {
+	      $self->handle_ready_player_request($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
+	  } elsif ($method eq 'unready') {
+	      $self->handle_unready_player_request($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
+	  } elsif ($method eq 'recorded') {
+	      $self->handle_recorded_request($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
+	  } elsif ($method eq 'stand') {
+	      $self->handle_stand_request($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
+	  } elsif ($method eq 'sit') {
+	      $self->handle_sit_request($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
+	  } elsif ($method eq 'set_language') {
+	      $self->handle_language_request($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
+	  } elsif ($method eq 'suspend_game') {
+	      $self->handle_suspend_request($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
+	  } elsif ($method eq 'kill_game') {
+	      $self->handle_kill_request($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
+	  } elsif ($method eq 'send_state') {
+	      $self->handle_state_request($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});	  
 	  } else {
-	      $ok_to_call = 1;
+	      $self->logger->warn("Got weird RPC request 'volity.$method' from $$rpc_info{from}.");
+	      $self->send_rpc_fault($$rpc_info{from}, $$rpc_info{id}, 603, "Unknown method: volity.$method");
+	      return;
 	  }
-      } else {
-	  unless ($self->game->is_config_variable($method)) {
-	      $self->send_rpc_fault($$rpc_info{from}, $$rpc_info{id}, 609, "Can't call $method! The game hasn't started yet.");
+      } elsif ($method =~ /^game\.(.*)$/) {
+	  # This appears to be a call to the game object.
+	  # Reaction depends on whether or not the game is afoot.
+	  my $method = $1;
+	  my $ok_to_call = 0;
+	  if ($self->game->is_afoot) {
+	      if ($self->game->is_config_variable($method)) {
+		  $self->send_rpc_fault($$rpc_info{from}, $$rpc_info{id}, 609, "You can't configure the game once it has started.");
+	      } else {
+		  $ok_to_call = 1;
+	      }
 	  } else {
-	      $ok_to_call = 1;
+	      unless ($self->game->is_config_variable($method)) {
+		  $self->send_rpc_fault($$rpc_info{from}, $$rpc_info{id}, 609, "Can't call $method! The game hasn't started yet.");
+	      } else {
+		  $ok_to_call = 1;
+	      }
 	  }
-      }
-      if ($ok_to_call) {
-	  $$rpc_info{method} = $method;
-	  $self->handle_game_rpc_request($rpc_info);
-	  $self->last_activity_time(time);
-      }
-  } elsif (my ($admin_method) = $$rpc_info{'method'} =~ /^admin\.(.*)$/) {
-      # Check that the sender is allowed to make this call.
-      my ($basic_sender_jid) = $$rpc_info{from} =~ /^(.*)\//;
-      if (grep($_ eq $basic_sender_jid, $self->server->admins)) {
-	  my $local_method = "admin_rpc_$admin_method";
-	  if ($self->can($local_method)) {
-	      $self->$local_method($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
+	  if ($ok_to_call) {
+	      $$rpc_info{method} = $method;
+	      $self->handle_game_rpc_request($rpc_info);
+	      $self->last_activity_time(time);
+	  }
+      } elsif (my ($admin_method) = $$rpc_info{'method'} =~ /^admin\.(.*)$/) {
+	  # Check that the sender is allowed to make this call.
+	  my ($basic_sender_jid) = $$rpc_info{from} =~ /^(.*)\//;
+	  if (grep($_ eq $basic_sender_jid, $self->server->admins)) {
+	      my $local_method = "admin_rpc_$admin_method";
+	      if ($self->can($local_method)) {
+		  $self->$local_method($$rpc_info{from}, $$rpc_info{id}, @{$$rpc_info{args}});
+	      } else {
+		  $self->send_rpc_fault($$rpc_info{from},
+					$$rpc_info{id},
+					603,
+					"Unknown methodName: '$$rpc_info{method}'",
+					);
+	      }
 	  } else {
+	      $self->logger->warn("$$rpc_info{from} attempted to call $$rpc_info{method}. But I don't recognize that JID as an admin, so I'm rejecting it.");
 	      $self->send_rpc_fault($$rpc_info{from},
 				    $$rpc_info{id},
-				    603,
-				    "Unknown methodName: '$$rpc_info{method}'",
+				    607,
+				    "You are not allowed to make admin calls on this parlor.",
 				    );
+	      return;
 	  }
+	  
       } else {
-	  $self->logger->warn("$$rpc_info{from} attempted to call $$rpc_info{method}. But I don't recognize that JID as an admin, so I'm rejecting it.");
+	  $self->logger->warn("Referee at " . $self->jid . " received a $$rpc_info{method} RPC request from $$rpc_info{from}. Eh?");
 	  $self->send_rpc_fault($$rpc_info{from},
-				   $$rpc_info{id},
-				   607,
-				   "You are not allowed to make admin calls on this parlor.",
-				   );
-	  return;
+				$$rpc_info{id},
+				603,
+				"Unknown methodName: '$$rpc_info{method}'",
+				);
+	  
       }
-
-  } else {
-      $self->logger->warn("Referee at " . $self->jid . " received a $$rpc_info{method} RPC request from $$rpc_info{from}. Eh?");
-      $self->send_rpc_fault($$rpc_info{from},
-			    $$rpc_info{id},
-			    603,
-			    "Unknown methodName: '$$rpc_info{method}'",
-			    );
-      
+  }; # End of loooong eval block
+  if ($@) {
+      $self->report_rpc_error(@_);
+      return;
   }
 }
 
@@ -431,6 +435,8 @@ sub handle_rpc_response {
 				 $info_hash->{response},
 				 );
     }
+
+     
 }
 
 # handle_game_rpc_request: Called by handle_rpc_request upon receipt of an
@@ -440,8 +446,11 @@ sub handle_game_rpc_request {
   my $self = shift;
   my ($rpc_info) = @_;
 
-  unless ($self->game->is_active) {
+  if (not $self->game->is_active and not $self->game->is_config_variable($$rpc_info{method})) {
     $self->send_rpc_fault($$rpc_info{from}, $$rpc_info{id}, 609, "There is no active game.");
+    return;
+  } elsif ($self->game->is_active and $self->game->is_config_variable($$rpc_info{method})) {
+    $self->send_rpc_fault($$rpc_info{from}, $$rpc_info{id}, 609, "You can't configure an active game");
     return;
   }
 
@@ -577,6 +586,11 @@ sub jabber_presence {
 	  # they're coming or going.
 	  $self->logger->debug("Looks like a player just joined.\n");
 	  my ($nick) = $node->attr('from') =~ /\/(.*)$/;
+	  my $volity_role;
+	  if ((my $c = $node->get_tag('c')) && 
+	      ($node->get_tag('c')->attr('node') eq "http://volity.org/protocol/caps")) {
+	      $volity_role = $c->attr('ext');
+	  }
 	  if (defined($node->attr('type')) && ($node->attr('type') eq 'unavailable')) {
 	      # Someone's left.
 	      my $player = $self->look_up_player_with_jid($new_person_jid);
@@ -590,51 +604,40 @@ sub jabber_presence {
 		  $player->is_missing(1);
 		  # Check to see if that seat is now abandoned.
 		  my $seat = $player->seat;
+                  $self->logger->debug("Someone just bolted while the game was active.");
 		  if ($seat && not($seat->is_under_control)) {
 		      # The seat is uncontrolled!
+                      $self->logger->debug("They left a seat uncontrolled!");
 		      if ($self->game->is_abandoned) {
 			  # Holy crap, _everyone_ has left!
 			  # Tell the onlookers (and the bots, I guess).
+                          $self->logger->debug("The game has been abandoned!");
 			  foreach ($self->players) {
 			      $_->game_is_abandoned;
 			  }
 			  # All right, we'll wait for someone to come back.
 			  my $deadline = time + $self->internal_timeout;
-			  until ((time >= $deadline) or (not($self->game->is_abandoned))) {
-			      $self->kernel->run_one_timeslice;
-			  }
-			  if ($self->game->is_abandoned) {
-			      # OK, give up waiting.
-			      $self->suspend_game;
-			      # But now a new wait begins.
-			      # If no replacement humans show up in 90 seconds,
-			      # I'm outta here.
-			      my $deadline = time + 90;
-			      until (
-				     (time >= $deadline) or
-				     ($self->non_missing_check)
-				     ) {
-				  $self->kernel->run_one_timeslice;
-			      }
-			      if (not($self->non_missing_check)) {
-				  # No humans came. I am unloved.
-				  # I'll just shut down, then.
-				  $self->logger->debug("There are no humans left here! I'm killing all the bots and leaving, too.");
-				  if ($self->game->is_afoot) {
-				      $self->logger->debug("But first, I'm sending a game record.");
-				      $self->end_game;
-				  }
-				  $self->stop;
-			      }
+                          $self->logger->debug("I am going to suspend the game at " . localtime($deadline));
 
-			  }
+                          $self->kernel->state("abandoned_game_timeout", $self);
+                          my $alarm_id = $self->kernel->alarm_set
+                              (
+                               "abandoned_game_timeout",
+                               $deadline,
+                           );
+                          $self->logger->debug("The alarm ID is $alarm_id");
+                          $self->abandon_timeout_alarm($alarm_id);
 		      }
 		      elsif ($self->game->is_disrupted) {
+                          $self->logger->debug("The game has been disrupted!");
 			  # Tell the players about the disruption.
 			  foreach ($self->players) {
 			      $_->game_is_disrupted;
 			  }
 		      }
+                      else {
+                          $self->logger->debug("The game is neither abandoned nor disrupted. (Huh?)");
+                      }                          
 		  }
 	      } else {
 		  # They left during game config? We'll just forget about them.
@@ -690,6 +693,13 @@ sub jabber_presence {
 			      foreach ($self->players) {
 				  $_->game_is_active;
 			      }
+                              # Also, cancel the abandonment timeout,
+                              # if there was one.
+                              if (my $alarm_id = $self->abandon_timeout_alarm) {
+                                  $self->logger->debug("Clearing abandon timeout alarm.");
+                                  $self->kernel->alarm_remove($alarm_id);
+                                  $self->abandon_timeout_alarm(undef);
+                              }
 			  }
 			  
 			  $rejoined = 1;
@@ -701,13 +711,21 @@ sub jabber_presence {
 	
 	      if (not($rejoined)) {
 		  # OK, this player is new to us.
-		  $player = $self->add_player({nick=>$nick, jid=>$new_person_jid});
+		  $player = $self->add_player({nick=>$nick, jid=>$new_person_jid, role=>$volity_role});
 		  # Also store this player's nickname, for later lookups.
 		  $self->logger->debug( "Storing $new_person_jid, under $nick");
-		  
-	      }
+
+                  # Also, cancel the post-abandonment suspend timeout,
+                  # if there was one.
+                  if (my $alarm_id = $self->suspend_timeout_alarm) {
+                      $self->logger->debug("Clearing suspend timeout alarm.");
+                      $self->kernel->alarm_remove($alarm_id);
+                      $self->abandon_timeout_alarm(undef);
+                  }
+
+              }
 	  }
-  
+          
       }
   }
 }
@@ -797,8 +815,12 @@ sub add_player {
   $self->{players}{$$args{jid}} = $player;
   $self->{nicks}{$$args{nick}} = $$args{jid};
 
-  # Set the new player's bot-bit if it has the JID of a known bot.
+  # Set the new player's bot-bit if it has the JID of a known bot,
+  # or if their presence packet looked botty.
   if (exists($self->{bot_jids}{$$args{jid}})) {
+      $player->is_bot(1);
+  }
+  elsif ($$args{role} eq "bot") {
       $player->is_bot(1);
   }
 
@@ -947,6 +969,7 @@ sub non_bot_check {
     my $self = shift;
     for my $nickname (keys(%{$self->{nicks}})) {
 	my $player = $self->look_up_player_with_nickname($nickname);
+        next unless $player;
 	unless ($player->is_bot) {
 	    # This is a human.
 	    return 1;
@@ -962,6 +985,7 @@ sub non_missing_check {
     my $self = shift;
     for my $nickname (keys(%{$self->{nicks}})) {
 	my $player = $self->look_up_player_with_nickname($nickname);
+	next unless $player;
 	unless ($player->is_bot || $player->is_missing) {
 	    # This is a non-missing human.
 	    return 1;
@@ -1136,57 +1160,37 @@ sub remove_bot {
   }
   my $bot = $self->look_up_player_with_jid($bot_jid);
   unless ($bot) {
-      $self->send_rpc_fault($from_jid, $id, ["volity.jid_not_present"]);
+      $self->send_rpc_response($from_jid, $id, ["volity.jid_not_present", $bot_jid]);
       return;
   }
   unless ($bot->is_bot) {
-      $self->send_rpc_fault($from_jid, $id, ["volity.not_bot"]);
+      $self->send_rpc_response($from_jid, $id, ["volity.not_bot", $bot_jid]);
       return;
   }
   if ($bot->seat) {
-      $self->send_rpc_fault($from_jid, $id, ["volity.bot_seated"]);
+      $self->send_rpc_response($from_jid, $id, ["volity.bot_seated", $bot_jid]);
   }
 
   # Having survived this obstacle course, we have determined that $bot
   # is, in fact a bot. Whom we will now eject from the table.
   my ($bot_object) = grep($bot->jid eq $_->jid, $self->active_bots);
-  $bot_object->stop;
-  $self->active_bots(grep($bot->jid ne $_->jid, $self->active_bots));
+  if ($bot_object) {
+      # This bot is one of mine! I'll just kill its thread.
+      $bot_object->stop;
+      $self->active_bots(grep($bot->jid ne $_->jid, $self->active_bots));
+  }
+  else {
+      # This bot is from a bot factory! I'll ask it to leave.
+      my $rpc_id = "bot-leave-" . $self->next_id;
+
+      $self->send_rpc_request({
+	  id         => $rpc_id,
+	  to         => $bot_jid,
+	  methodname => "volity.leave_table",
+      });      
+  }
 }
   
-
-
-# choose_bot: Called on receipt of a form with bot choice.
-# XXX CAUTION XXXX
-# This won't work, since Volity::Jabber::Form is currently commented out.
-sub choose_bot {
-  my $self = shift;
-  my ($iq) = @_;
-  my $form = Volity::Jabber::Form->new_from_element($iq->get_tag('query')->get_tag('x'));
-  my $chosen_bot_class = $form->field_with_var('bot');
-  unless (defined($chosen_bot_class)) {
-    carp("Received a bot-choosing form with no choice?");
-    # XXX Send an error message here?
-    return;
-  }
-
-  # Make sure that the chosen class is one that we actually offer...
-  unless (grep($_->{class} eq $chosen_bot_class, $self->bot_configs)) {
-    carp("Got a request for bot class $chosen_bot_class, but I don't offer that?");
-    # XXX Send an error message here?
-    return;
-  }
-
-  if (my $bot = $self->create_bot(($chosen_bot_class))) {
-    # It's all good.
-    $bot->kernel->run;
-    return;
-  } else {
-    # Oh no, the bot didn't get added.
-    carp ("Failed to add a bot of class $chosen_bot_class.");
-    # XXX Do something errory here.
-  }
-}
 
 sub create_bot {
   my $self = shift;
@@ -1266,17 +1270,20 @@ sub end_game {
   # Mark whether or not the game actually finished.
   $record->finished($self->game->is_finished);
   
-  # Send the record to the bookkeeper!
-  $self->send_record_to_bookkeeper($record);
+  # Send the record to the bookkeeper if this game was "on the books"
+  $self->send_record_to_bookkeeper($record) if $self->is_recorded;
+
+  # Clear the winners list, so that the next game record is accurate
+  $self->game->winners->clear();
 
   # Reset seat histories.
   foreach ($self->seats) {
       $_->clear_registry;
   }
 
-  # Create a fresh new game.
-  delete($self->{game});
-  $self->create_game;
+  # A fresh new game object used to be created here, but that interfered with
+  # preserving game configuration state between runs.  This also brings
+  # frivolity in line with the python parlor software.
 
   $self->games_completed($self->games_completed + 1);
 }
@@ -1528,7 +1535,12 @@ sub handle_ready_player_request {
   $self->logger->debug("$from_jid has announced readiness.");
   my $player = $self->look_up_player_with_jid($from_jid);
   if ($player) {
-      if ($player->seat) {
+      if ($self->current_state eq 'active') {
+          $self->logger->debug("But the game is active!");
+          $self->send_rpc_fault ($from_jid, $rpc_id, 607, "You wish to state your readiness to play, but this game is already active.");
+          return;
+      }          
+      elsif ($player->seat) {
 	  # Make sure that the game is ready for readiness.
 	  # First, check that the required seats are occupied.
 	  my @empty_required_seats;
@@ -1817,7 +1829,8 @@ sub handle_rpc_fault {
     $self->send_rpc_fault($inviter, $original_rpc_id, $$fault_info{code}, $$fault_info{string});
     delete($self->invitations->{$$fault_info{id}});
   } else {
-    $self->logger->warn("Got unexpected RPC fault from $$fault_info{from}, id $$fault_info{id}: $$fault_info{code} - $$fault_info{string}");
+    $self->logger->warn("Got unexpected RPC fault from $$fault_info{from}, id $$fault_info{id}: $$fault_info{fault_code} - $$fault_info{fault_string}");
+
   }
 }
 
@@ -1989,6 +2002,39 @@ sub admin_rpc_announce {
     $self->send_rpc_response($from_jid, $rpc_id, ["volity.ok"]);
 }
 
+# abandoned_game_timeout: Called via POE kernel alarm, if an abandoned game
+# doesn't get un-abandoned in time.
+sub abandoned_game_timeout {
+    my $self = shift;
+    $self->logger->debug(q{The abandoned game didn't recover. I'm suspending it.});
+    $self->abandon_timeout_alarm(undef);
+    $self->suspend_game;
+    # But now a new wait begins.
+    # If no humans show up soon, I'm outta here.
+    my $deadline = time + $self->internal_timeout;
+    $self->logger->debug("I am going to kill the game at " . localtime($deadline));
+    $self->kernel->state("suspended_game_timeout", $self);
+    my $alarm_id = $self->kernel->alarm_set
+        (
+         "suspended_game_timeout",
+         $deadline,
+     );
+    $self->suspend_timeout_alarm($alarm_id);
+}
+
+# suspended_game_timeout: Called via POE kernel alarm, if a suspended game
+# that was abandoned earlier doesn't see any humans in time.
+sub suspended_game_timeout {
+    my $self = shift;
+    # No humans came. I am unloved.
+    # I'll just shut down, then.
+    $self->logger->debug("There are no humans left here! I'm killing all the bots and leaving, too.");
+    if ($self->game->is_afoot) {
+        $self->logger->debug("But first, I'm sending a game record.");
+        $self->end_game;
+    }
+    $self->stop;
+}
 
 =head1 AUTHOR
 
@@ -1996,7 +2042,7 @@ Jason McIntosh <jmac@jmac.org>
 
 =head1 COPYRIGHT
 
-Copyright (c) 2003-2006 by Jason McIntosh.
+Copyright (c) 2003-2007 by Jason McIntosh.
 
 =cut
 
